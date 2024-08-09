@@ -1,0 +1,18 @@
+# ide
+.vscode/
+.idea/
+
+# macos
+.DS_Store
+__MACOSX/
+
+# python
+__pycache__/
+.pytest_cache/
+.coverage
+
+# project
+/models/
+/data/
+results/
+gravit.egg-info
