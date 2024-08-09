@@ -1,25 +1,82 @@
+import os
+import glob
 import torch
+import argparse
+import numpy as np
 from torch_geometric.loader import DataLoader
+from gravit.utils.parser import get_cfg
+from gravit.utils.logger import get_logger
 from gravit.models import build_model
 from gravit.datasets import GraphDataset
+from gravit.utils.formatter import get_formatting_data_dict, get_formatted_preds
+from gravit.utils.eval_tool import get_eval_score
+from gravit.utils.vs import avg_splits
+import csv
 
-def predict(cfg, data_path):
-    # 设置设备
+def save_prediction_image(pred, save_path, index):
+    """
+    Helper function to save the prediction result as an image.
+    Args:
+        pred: The prediction data to be saved (could be an image, a heatmap, etc.).
+        save_path: Path where the image should be saved.
+        index: Index of the current prediction.
+    """
+    plt.figure()
+    plt.imshow(pred, cmap='viridis')  # 根据需要调整显示方式
+    plt.colorbar()
+    plt.savefig(os.path.join(save_path, f'prediction_{index}.png'))
+    plt.close()
+
+
+def evaluate(cfg):
+    """
+    Run the evaluation process given the configuration
+    """
+
+    # Input and output paths
+    path_graphs = os.path.join(cfg['root_data'], f'graphs/{cfg["graph_name"]}')
+    path_result = os.path.join(cfg['root_result'], f'{cfg["exp_name"]}')
+    if cfg['split'] is not None:
+        path_graphs = os.path.join(path_graphs, f'split{cfg["split"]}')
+        path_result = os.path.join(path_result, f'split{cfg["split"]}')
+
+    # Prepare the logger
+    logger = get_logger(path_result, file_name='eval')
+    logger.info(cfg['exp_name'])
+    logger.info(path_result)
+    # Build a model and prepare the data loaders
+    logger.info('Preparing a model and data loaders')
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    
-    # 构建模型并加载权重
     model = build_model(cfg, device)
-    model.load_state_dict(torch.load(os.path.join(cfg['root_result'], cfg['exp_name'], 'ckpt_best.pt')))
-    model.to(device)
+    val_loader = DataLoader(GraphDataset(os.path.join(path_graphs, 'val')))
+    num_val_graphs = len(val_loader)
+
+    # Init
+    #x_dummy = torch.tensor(np.array(np.random.rand(10, 1024), dtype=np.float32), dtype=torch.float32).to(device)
+    #node_source_dummy = np.random.randint(10, size=5)
+    #node_target_dummy = np.random.randint(10, size=5)
+    #edge_index_dummy = torch.tensor(np.array([node_source_dummy, node_target_dummy], dtype=np.int64), dtype=torch.long).to(device)
+    #signs = np.sign(node_source_dummy - node_target_dummy)
+    #edge_attr_dummy = torch.tensor(signs, dtype=torch.float32).to(device)
+    #model(x_dummy, edge_index_dummy, edge_attr_dummy, None)
+
+    # Load the trained model
+    logger.info('Loading the trained model')
+    state_dict = torch.load(os.path.join(path_result, 'ckpt_best.pt'), map_location=torch.device('cpu'))
+    model.load_state_dict(state_dict)
     model.eval()
-    
-    # 准备数据加载器
-    test_loader = DataLoader(GraphDataset(data_path), batch_size=cfg['batch_size'], shuffle=False)
-    
-    # 进行预测
-    predictions = []
+
+    # Load the feature files to properly format the evaluation results
+    logger.info('Retrieving the formatting dictionary')
+    data_dict = get_formatting_data_dict(cfg)
+
+    # Run the evaluation process
+    logger.info('Evaluation process started')
+
+    preds_all = []
     with torch.no_grad():
-        for data in test_loader:
+        for i, data in enumerate(val_loader, 1):
+            g = data.g.tolist()
             x = data.x.to(device)
             edge_index = data.edge_index.to(device)
             edge_attr = data.edge_attr.to(device)
@@ -28,22 +85,69 @@ def predict(cfg, data_path):
                 c = data.c.to(device)
 
             logits = model(x, edge_index, edge_attr, c)
-            preds = torch.argmax(logits, dim=1)
-            predictions.append(preds.cpu().numpy())
-    
-    # 将所有预测结果整合
-    predictions = np.concatenate(predictions)
-    return predictions
+
+            # Change the format of the model output
+            preds = get_formatted_preds(cfg, logits, g, data_dict)
+
+            preds_all.extend(preds)
+
+            # Save each prediction as an image
+            # for j, pred in enumerate(preds):
+            #     print(pred)
+            #     save_prediction_image(pred, path_result, index=f'{i}_{j}')
+
+            logger.info(f'[{i:04d}|{num_val_graphs:04d}] processed')
+
+    # Compute the evaluation score
+    logger.info(f'Computing the evaluation score')
+    eval_score, all_pred_summary = get_eval_score(cfg, preds_all)
+    all_pred_summary_idx = []
+    for pred_summary in all_pred_summary:
+        pred_summary_idx = [index for index, value in enumerate(pred_summary) if value == 1]
+        all_pred_summary_idx.append(pred_summary_idx)
+    # print(all_pred_summary)
+    with open('result.csv', mode='w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerows(all_pred_summary_idx)
+    logger.info(f'{cfg["eval_type"]} evaluation finished: {eval_score}\n')
+    return eval_score
 
 if __name__ == "__main__":
-    args = get_args()
-    cfg = get_cfg(args)
-    
-    # 设置数据路径
-    test_data_path = os.path.join(cfg['root_data'], f'graphs/{cfg["graph_name"]}/test')
-    
-    # 获取预测结果
-    predictions = predict(cfg, test_data_path)
-    
-    # 输出预测结果
-    print(predictions)
+    """
+    Evaluate the trained model from the experiment "exp_name"
+    """
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--root_data',     type=str,   help='Root directory to the data', default='./data')
+    parser.add_argument('--root_result',   type=str,   help='Root directory to output', default='./results')
+    parser.add_argument('--dataset',       type=str,   help='Name of the dataset')
+    parser.add_argument('--exp_name',      type=str,   help='Name of the experiment', required=True)
+    parser.add_argument('--eval_type',     type=str,   help='Type of the evaluation', required=True)
+    parser.add_argument('--split',         type=int,   help='Split to evaluate')
+    parser.add_argument('--all_splits',    action='store_true',   help='Evaluate all splits')
+
+    args = parser.parse_args()
+
+    path_result = os.path.join(args.root_result, args.exp_name)
+    if not os.path.isdir(path_result):
+        raise ValueError(f'Please run the training experiment "{args.exp_name}" first')
+
+    results = []
+    if args.all_splits:
+        results = glob.glob(os.path.join(path_result, "*", "cfg.yaml"))
+    else:
+        if args.split:
+            path_result = os.path.join(path_result, f'split{args.split}')
+            if not os.path.isdir(path_result):
+                raise ValueError(f'Please run the training experiment "{args.exp_name}" first')
+
+        results.append(os.path.join(path_result, 'cfg.yaml'))
+
+    all_eval_results = []
+    for result in results:
+        args.cfg = result
+        cfg = get_cfg(args)
+        all_eval_results.append(evaluate(cfg))
+
+    if "VS" in args.eval_type and args.all_splits:
+        avg_splits.print_results(all_eval_results)

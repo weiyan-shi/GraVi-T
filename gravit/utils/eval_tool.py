@@ -446,6 +446,7 @@ def get_eval_score(cfg, preds):
             all_f1_scores = []
             all_taus = []
             all_rhos = []
+            all_pred_summary = []
             for video, scores in preds:
 
                 n_samples = hdf.get(video + '/n_steps')[()]
@@ -482,6 +483,7 @@ def get_eval_score(cfg, preds):
                     sum_segs[i][0] = gt_segments[seg][0]
                     sum_segs[i][1] = gt_segments[seg][1]
 
+                all_pred_summary.append(pred_summary)
                 # Calculate F1-Score per user summary
                 user_summary = np.zeros(n_frames, dtype=np.int8)
                 n_user_sums = user_summaries.shape[0]
@@ -522,4 +524,4 @@ def get_eval_score(cfg, preds):
         rho = sum(all_rhos) / len(all_rhos)
 
         str_score = f"F1-Score = {f1_score}, Tau = {tau}, Rho = {rho}"
-    return str_score
+    return str_score, all_pred_summary
